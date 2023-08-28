@@ -121,7 +121,7 @@ main() {
   local downloadResponse
   local loginResponse
 
-  echo "🔍 Looking up app in the ${countryCode^^} region..."
+  echo "🔍 Looking up app in the $(echo "$countryCode" | tr '[:lower:]' '[:upper:]') region..."
 
   # Quit if trackId is not a number
   if ! [[ "$trackId" =~ ^[0-9]+$ ]]; then
