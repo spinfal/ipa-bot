@@ -67,7 +67,10 @@ transfer_file() {
   updatedJson=$(echo "$appInfoResponse" | jq --arg filename "$filename" --arg chatId "$chatId" --arg topicId "$topicId" '. + {filename: $filename, chatId: $chatId, topicId: $topicId, expireAt: (now | strflocaltime("%Y-%m-%dT%H:%M:%SZ") | fromdate + 172800 | strftime("%Y-%m-%dT%H:%M:%SZ")) }')
 
   # Insert the updated JSON into the MongoDB collection
-  mongosh "$MONGODB_URL" --quiet --eval "db.app_info_collection.insertOne($updatedJson)"
+  mongosh "$MONGODB_URL" --quiet --eval "db.app_info_collection.insertOne($updatedJson)" &>/dev/null
+
+  # Create a TTL index on the 'expireAt' field if it doesn't exist
+  mongosh "$MONGODB_URL" --quiet --eval 'if (!db.app_info_collection.getIndexes().some(index => index.key.expireAt)) { db.app_info_collection.createIndex( { "expireAt": 1 }, { expireAfterSeconds: 0 } ) }' &>/dev/null
 }
 
 check_files() {
@@ -99,31 +102,6 @@ function uninstall_app() {
 
   echo "❌ Could not uninstall app."
   return 1
-}
-
-function verify_upload_ipa() {
-  local bundleId=$1
-  local decryptedIPA=$2
-
-  echo "🔐 Validating the decrypted app..."
-  install_app "$bundleId" "$decryptedIPA"
-  if [[ $? -eq 1 ]]; then
-    echo "❌ Failed to validate the decrypted app."
-    return 1
-  fi
-
-  if ! ideviceinstaller -l | grep -q "$bundleId"; then
-    echo "❌ Failed to install app."
-    return 1
-  fi
-
-  # Don't need the app anymore
-  uninstall_app "$bundleId"
-  if [[ $? -eq 1 ]]; then
-    return 1
-  fi
-
-  return 0
 }
 
 main() {
@@ -172,21 +150,15 @@ main() {
       exit 1
     fi
   fi
+
   echo "✅ License exists"
 
   # Check for existing decrypted files
   # Automatic region changing will be coming eventually, and it will replace some of the code below when it's ready
   decryptedIPA=$(check_files "ipa-files/decrypted" "$bundleId")
   if [[ -n "$decryptedIPA" ]]; then
-    verify_upload_ipa "$bundleId" "$decryptedIPA"
-    if [[ $? -eq 1 ]]; then
-      echo "❌ Failed to install decrypted app."
-      exit 1
-    fi
-
     transfer_file "$decryptedIPA" "$chatId" "$topicId" "$appInfoResponse"
     echo "⬆️ Starting IPA upload..."
-
     exit 0
   fi
 
@@ -200,7 +172,6 @@ main() {
     downloadResponse=$("$ipatool" --keychain-passphrase "$SSH_PASSWORD" --non-interactive download -b "$bundleId" --purchase -o "ipa-files/encrypted" --format json)
 
     # Log back into iTunes if the session has expired
-    # Weird that not all downloads have an expired pw
     if [[ "$downloadResponse" = *"expired"* ]]; then
       loginResponse=$("$ipatool" --keychain-passphrase "$SSH_PASSWORD" --non-interactive auth login -e "$ITUNES_USER" -p "$ITUNES_PASS" --format json)
       if [[ "$loginResponse" != *"success"* ]]; then
@@ -227,6 +198,7 @@ main() {
       echo "❌ File not found in the downloads directory."
       exit 1
     fi
+  fi
 
   # Install App
   if ! install_app "$bundleId" "$downloadedIPA"; then
@@ -240,9 +212,8 @@ main() {
     exit 1
   fi
 
-  echo "🔐 Decrypting app..."
-
   # Decrypt App
+  echo "🔐 Decrypting app..."
   decrypt_app "$bundleId" "$downloadedIPA"
   if [[ $? -eq 1 ]]; then
     echo "❌ Failed to decrypt app."
@@ -259,22 +230,13 @@ main() {
   # Check for existing decrypted files
   decryptedIPA=$(check_files "ipa-files/decrypted" "$bundleId")
   if [[ $? -eq 1 ]]; then
-    # The original encrypted IPA is already uninstalled at this point
-    # Try to install the decrypted IPA to confirm it works
-    verify_upload_ipa "$bundleId" "$decryptedIPA"
-    if [[ $? -eq 1 ]]; then
-      echo "❌ Failed to install decrypted app."
-      exit 1
-    fi
+    transfer_file "$decryptedIPA" "$chatId" "$topicId" "$appInfoResponse"
+    echo "⬆️ Starting IPA upload..."
+    exit 0
   else
     echo "❌ No decrypted files found for app."
     exit 1
   fi
-  
-  transfer_file "$decryptedIPA" "$chatId" "$topicId" "$appInfoResponse"
-  echo "⬆️ Starting IPA upload..."
-
-  exit 0
 }
 
 main "$1" "$2" "$3"
