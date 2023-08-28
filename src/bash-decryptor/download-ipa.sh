@@ -60,6 +60,8 @@ transfer_file() {
   local filename
   local updatedJson
 
+  echo "ℹ️ Adding entry to MongoDB..."
+
   # Extract the file name from the file path
   filename=$(basename "$file_path")
 
